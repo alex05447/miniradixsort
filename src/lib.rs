@@ -10,108 +10,10 @@
 //! Initial motivation: in-place byte slice suffix array sorting for string matching purposes.
 
 use {
-    core::ops::{AddAssign, SubAssign},
     miniunchecked::*,
-    num_traits::{Bounded, FromPrimitive, Num, ToPrimitive},
-    std::{
-        cmp::Ordering,
-        num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
-    },
+    miniunsigned::{NonZero, Unsigned},
+    std::cmp::Ordering,
 };
-
-/// Trait for sorted slice sizes.
-///
-/// `u16`, `u32`, `u64`, `usize`.
-///
-/// Sometimes it makes sense to use a smaller type
-/// when the size of the sorted slice is known to be limited (e.g. windowing is used)
-/// to reduce stack overhead of radix sorting.
-///
-/// It is something like `size_of::<SizeType>() * 256 * 2` per radix recursion level,
-/// where `256` is the number of buckets, `* 2` is for bucket start and end indices.
-/// E.g. with `SizeType` = `usize` / `u64`, it's 4 Kb per recursion level, of which there will be realistically 2 to 3.
-/// Using `u32` / `u16` instead for slices up to 4 Gb / 64 Kb reduces this x2 / x4.
-pub trait SizeType:
-    Copy + PartialOrd + Num + Bounded + AddAssign + SubAssign + FromPrimitive + ToPrimitive
-{
-}
-
-#[cfg(test)]
-impl SizeType for u8 {}
-
-impl SizeType for u16 {}
-
-impl SizeType for u32 {}
-
-#[cfg(target_pointer_width = "64")]
-impl SizeType for u64 {}
-
-impl SizeType for usize {}
-
-fn to_usize<S: SizeType>(val: S) -> usize {
-    // Succeeds for all supported types.
-    unsafe { val.to_usize().unwrap_unchecked_dbg() }
-}
-
-/// A non-zero [`SizeType`].
-///
-/// `NonZeroU16`, `NonZeroU32`, `NonZeroU64`, `NonZeroUsize`.
-pub trait NonZero<S: SizeType>: Copy {
-    fn new(val: S) -> Option<Self>;
-    fn get(self) -> S;
-}
-
-#[cfg(test)]
-impl NonZero<u8> for std::num::NonZeroU8 {
-    fn new(val: u8) -> Option<Self> {
-        Self::new(val)
-    }
-
-    fn get(self) -> u8 {
-        self.get()
-    }
-}
-
-impl NonZero<u16> for NonZeroU16 {
-    fn new(val: u16) -> Option<Self> {
-        Self::new(val)
-    }
-
-    fn get(self) -> u16 {
-        self.get()
-    }
-}
-
-impl NonZero<u32> for NonZeroU32 {
-    fn new(val: u32) -> Option<Self> {
-        Self::new(val)
-    }
-
-    fn get(self) -> u32 {
-        self.get()
-    }
-}
-
-#[cfg(target_pointer_width = "64")]
-impl NonZero<u64> for NonZeroU64 {
-    fn new(val: u64) -> Option<Self> {
-        Self::new(val)
-    }
-
-    fn get(self) -> u64 {
-        self.get()
-    }
-}
-
-impl NonZero<usize> for NonZeroUsize {
-    fn new(val: usize) -> Option<Self> {
-        Self::new(val)
-    }
-
-    fn get(self) -> usize {
-        self.get()
-    }
-}
 
 /// Number of unique byte values
 /// and thus unique buckets in any slice sorted based on a byte key.
@@ -143,17 +45,17 @@ pub const NUM_BUCKETS: usize = u8::MAX as usize + 1;
 /// starting with `lvl = 0`.
 pub fn counting_sort<S, F, T, B>(slice: F, result: &mut [T], b: &B) -> [S; NUM_BUCKETS]
 where
-    S: SizeType,
+    S: Unsigned,
     F: Fn(S) -> T,
     B: Fn(&T) -> u8,
 {
     let result_len = S::from_usize(result.len()).unwrap_or(S::max_value());
     // Safe because `result_len <= result.len()`.
-    let result = unsafe { result.get_unchecked_mut(..to_usize(result_len)) };
+    let result = unsafe { result.get_unchecked_mut(..result_len.to_usize()) };
 
     let mut bucket_sizes = [S::zero(); NUM_BUCKETS];
 
-    for i in 0..to_usize(result_len) {
+    for i in 0..result_len.to_usize() {
         // Safe because `i <= result_len <= S::max_value()`.
         bucket_sizes[b(&slice(unsafe { S::from_usize(i).unwrap_unchecked_dbg() })) as usize] +=
             S::one();
@@ -169,11 +71,11 @@ where
         }
     }
 
-    for i in 0..to_usize(result_len) {
+    for i in 0..result_len.to_usize() {
         // Safe because `result_len <= S::max_value()`.
         let element = slice(unsafe { S::from_usize(i).unwrap_unchecked_dbg() });
         let pos = &mut bucket_starts[b(&element) as usize];
-        result[to_usize(*pos)] = element;
+        result[pos.to_usize()] = element;
         *pos += S::one();
     }
 
@@ -188,12 +90,12 @@ where
 /// equal to the lowest length among them will be sorted.
 pub fn counting_sort_slice<S, T, B>(slice: &[T], result: &mut [T], b: &B) -> [S; NUM_BUCKETS]
 where
-    S: SizeType,
+    S: Unsigned,
     T: Clone,
     B: Fn(&T) -> u8,
 {
     let len = slice.len().min(result.len());
-    counting_sort::<S, _, _, _>(|i: S| slice[to_usize(i)].clone(), &mut result[..len], b)
+    counting_sort::<S, _, _, _>(|i: S| slice[i.to_usize()].clone(), &mut result[..len], b)
 }
 
 /// Use the standard library (unstable, quick)sort for slices shorter than this threshold.
@@ -223,7 +125,7 @@ const AMERICAN_FLAG_SORT_THRESHOLD: usize = 1024;
 /// [`https://github.com/skarupke/ska_sort`]()
 pub fn radix_sort<S, N, T, B>(slice: &mut [T], b: &B, num_lvls: N)
 where
-    S: SizeType,
+    S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8,
 {
@@ -236,7 +138,7 @@ where
 /// Does nothing if `lvl >= num_lvls`.
 pub fn radix_sort_lvl<S, N, T, B>(slice: &mut [T], b: &B, lvl: S, num_lvls: N)
 where
-    S: SizeType,
+    S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8,
 {
@@ -255,7 +157,7 @@ fn radix_sort_impl<const ST: usize, const AT: usize, S, N, T, B>(
     lvl: S,
     num_lvls: N,
 ) where
-    S: SizeType,
+    S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8 + ?Sized,
 {
@@ -272,7 +174,7 @@ fn radix_sort_impl<const ST: usize, const AT: usize, S, N, T, B>(
 
 fn std_sort<S, N, T, B>(slice: &mut [T], b: B, lvl: S, num_lvls: N)
 where
-    S: SizeType,
+    S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8,
 {
@@ -296,7 +198,7 @@ where
 
 fn bucket_sizes<S, T, B>(slice: &mut [T], b: &B, lvl: S) -> [S; NUM_BUCKETS]
 where
-    S: SizeType,
+    S: Unsigned,
     B: Fn(&T, S) -> u8 + ?Sized,
 {
     let mut bucket_sizes = [S::zero(); NUM_BUCKETS];
@@ -314,14 +216,14 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
     lvl: S,
     num_lvls: N,
 ) where
-    S: SizeType,
+    S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8 + ?Sized,
 {
     debug_assert!(lvl < num_lvls.get());
 
     let slice_len = S::from_usize(slice.len()).unwrap_or(S::max_value());
-    let slice = unsafe { slice.get_unchecked_mut(..to_usize(slice_len)) };
+    let slice = unsafe { slice.get_unchecked_mut(..slice_len.to_usize()) };
 
     // Calculate the byte bucket sizes at the radix `lvl`.
     let bucket_sizes = bucket_sizes(slice, b, lvl);
@@ -346,7 +248,7 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
                 *b_start = sum;
                 sum += b_size;
 
-                remaining_buckets[to_usize(num_remaining_buckets)] = b_idx as u8;
+                remaining_buckets[num_remaining_buckets.to_usize()] = b_idx as u8;
                 num_remaining_buckets += S::one();
 
                 *b_end = sum;
@@ -358,11 +260,11 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
     if num_remaining_buckets > S::one() {
         let mut remaining_bucket_index = S::zero();
         let mut remaining_bucket_end =
-            bucket_ends[remaining_buckets[to_usize(remaining_bucket_index)] as usize];
+            bucket_ends[remaining_buckets[remaining_bucket_index.to_usize()] as usize];
         let mut index = S::zero();
 
         'recursion_level: loop {
-            let byte = b(&slice[to_usize(index)], lvl);
+            let byte = b(&slice[index.to_usize()], lvl);
             let bucket_start = bucket_starts[byte as usize];
             let bucket_end = bucket_ends[byte as usize];
 
@@ -391,7 +293,7 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
                         }
 
                         let remaining_bucket =
-                            remaining_buckets[to_usize(remaining_bucket_index)] as usize;
+                            remaining_buckets[remaining_bucket_index.to_usize()] as usize;
 
                         let remaining_bucket_start = bucket_starts[remaining_bucket];
                         remaining_bucket_end = bucket_ends[remaining_bucket];
@@ -408,7 +310,7 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
             // If the current slice element is in a wrong bucket, swap it with an element in that bucket.
             // Process that element on the next iteration.
             } else {
-                slice.swap(to_usize(index), to_usize(bucket_start));
+                slice.swap(index.to_usize(), bucket_start.to_usize());
                 bucket_starts[byte as usize] += S::one();
                 debug_assert!(bucket_starts[byte as usize] <= bucket_ends[byte as usize]);
             }
@@ -425,7 +327,7 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
     // Sanity check.
     #[cfg(debug_assertions)]
     {
-        for rbi in 0..to_usize(num_remaining_buckets) {
+        for rbi in 0..num_remaining_buckets.to_usize() {
             let bi = remaining_buckets[rbi] as usize;
             debug_assert!(bucket_starts[bi] == bucket_ends[bi]);
         }
@@ -437,14 +339,14 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
         let mut bucket_start = S::zero();
         for &bi in remaining_buckets
             .iter()
-            .take(to_usize(num_remaining_buckets))
+            .take(num_remaining_buckets.to_usize())
         {
             let bucket_end = bucket_ends[bi as usize];
             debug_assert!(bucket_end > bucket_start);
             let bucket_size = bucket_end - bucket_start;
             if bucket_size > S::one() {
                 radix_sort_impl::<ST, AT, S, N, _, _>(
-                    &mut slice[to_usize(bucket_start)..to_usize(bucket_end)],
+                    &mut slice[bucket_start.to_usize()..bucket_end.to_usize()],
                     b,
                     next_lvl,
                     num_lvls,
@@ -461,14 +363,14 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
     lvl: S,
     num_lvls: N,
 ) where
-    S: SizeType,
+    S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8 + ?Sized,
 {
     debug_assert!(lvl < num_lvls.get());
 
     let slice_len = S::from_usize(slice.len()).unwrap_or(S::max_value());
-    let slice = unsafe { slice.get_unchecked_mut(..to_usize(slice_len)) };
+    let slice = unsafe { slice.get_unchecked_mut(..slice_len.to_usize()) };
 
     // Calculate the byte bucket sizes at the radix `lvl`.
     let bucket_sizes = bucket_sizes(slice, b, lvl);
@@ -492,7 +394,7 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
                 *b_start = sum;
                 sum += b_size;
 
-                remaining_buckets[to_usize(num_remaining_buckets)] = b_idx as u8;
+                remaining_buckets[num_remaining_buckets.to_usize()] = b_idx as u8;
                 num_remaining_buckets += S::one();
             }
             *b_end = sum;
@@ -504,7 +406,7 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
         // Partition the remaining buckets into unsorted (at the start, we'll process those) and sorted (at the end, we don't care about these).
         // Get the index past the last unsorted (or first sorted) remaining bucket (which is also equal to the number of remaining unsorted buckets).
         num_remaining_unsorted_buckets = slice_partition_index(
-            &mut remaining_buckets[0..to_usize(num_remaining_unsorted_buckets)],
+            &mut remaining_buckets[0..num_remaining_unsorted_buckets.to_usize()],
             |&b_idx| {
                 let bucket_start = bucket_starts[b_idx as usize];
                 let bucket_end = bucket_ends[b_idx as usize];
@@ -517,9 +419,9 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
 
                 // The bucket is unsorted (yet) - do up to four iterations of unconditional swaps.
                 unroll_4(bucket_start, bucket_end - bucket_start, |index| {
-                    let byte = b(&slice[to_usize(index)], lvl);
+                    let byte = b(&slice[index.to_usize()], lvl);
                     let offset = &mut bucket_starts[byte as usize];
-                    slice.swap(to_usize(index), to_usize(*offset));
+                    slice.swap(index.to_usize(), offset.to_usize());
                     *offset += S::one();
                 });
 
@@ -547,7 +449,7 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
     // Sanity check.
     #[cfg(debug_assertions)]
     {
-        for rbi in 0..to_usize(num_remaining_buckets) {
+        for rbi in 0..num_remaining_buckets.to_usize() {
             let bi = remaining_buckets[rbi] as usize;
             debug_assert!(bucket_starts[bi] == bucket_ends[bi]);
         }
@@ -567,7 +469,7 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
 
         for &bi in remaining_buckets
             .iter()
-            .take(to_usize(num_remaining_buckets))
+            .take(num_remaining_buckets.to_usize())
         {
             let bucket_start = bucket_start(bi);
             let bucket_end = bucket_end(bi);
@@ -575,7 +477,7 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
             let bucket_size = bucket_end - bucket_start;
             if bucket_size > S::one() {
                 radix_sort_impl::<ST, AT, S, N, _, _>(
-                    &mut slice[to_usize(bucket_start)..to_usize(bucket_end)],
+                    &mut slice[bucket_start.to_usize()..bucket_end.to_usize()],
                     b.clone(),
                     next_lvl,
                     num_lvls,
@@ -592,7 +494,7 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
 /// Returns the index of the first element in the second section / just past the last element in the first section.
 fn slice_partition_index<S, T, F>(slice: &mut [T], mut f: F) -> S
 where
-    S: SizeType,
+    S: Unsigned,
     F: FnMut(&T) -> bool,
 {
     let slice_len = S::from_usize(slice.len()).unwrap_or(S::max_value());
@@ -623,7 +525,7 @@ where
             return l;
         }
 
-        if !f(&slice[to_usize(l)]) {
+        if !f(&slice[l.to_usize()]) {
             break;
         }
 
@@ -637,8 +539,8 @@ where
             return l;
         }
 
-        if f(&slice[to_usize(r)]) {
-            slice.swap(to_usize(l), to_usize(r));
+        if f(&slice[r.to_usize()]) {
+            slice.swap(l.to_usize(), r.to_usize());
             l += S::one();
         }
 
@@ -648,12 +550,12 @@ where
 
 fn unroll_4<S, F>(mut index: S, num: S, mut f: F)
 where
-    S: SizeType,
+    S: Unsigned,
     F: FnMut(S),
 {
     let four = unsafe { S::from_usize(4).unwrap_unchecked_dbg() };
     let num_loops = num / four;
-    for _ in 0..to_usize(num_loops) {
+    for _ in 0..num_loops.to_usize() {
         f(index);
         index += S::one();
         f(index);
@@ -676,7 +578,7 @@ mod tests {
     use {
         super::*,
         rand::{distributions::Distribution, seq::SliceRandom, Rng, SeedableRng},
-        std::num::NonZeroU8,
+        std::num::{NonZeroU16, NonZeroU32, NonZeroU8},
     };
 
     #[test]
@@ -972,7 +874,7 @@ mod tests {
 
     fn american_flag_sort_bytes<S, N>(bytes: &mut [u8])
     where
-        S: SizeType,
+        S: Unsigned,
         N: NonZero<S>,
     {
         american_flag_sort::<1, { usize::MAX }, S, N, _, _>(
@@ -1000,7 +902,7 @@ mod tests {
 
     fn american_flag_sort_tuples<S, N>(tuples: &mut [(u8, u8)])
     where
-        S: SizeType,
+        S: Unsigned,
         N: NonZero<S>,
     {
         american_flag_sort::<1, { usize::MAX }, S, N, _, _>(
@@ -1074,7 +976,7 @@ mod tests {
 
     fn ska_sort_bytes<S, N>(bytes: &mut [u8])
     where
-        S: SizeType,
+        S: Unsigned,
         N: NonZero<S>,
     {
         ska_sort::<1, 1, S, N, _, _>(
@@ -1102,7 +1004,7 @@ mod tests {
 
     fn ska_sort_tuples<S, N>(tuples: &mut [(u8, u8)])
     where
-        S: SizeType,
+        S: Unsigned,
         N: NonZero<S>,
     {
         ska_sort::<1, 1, S, N, _, _>(
@@ -1168,7 +1070,7 @@ mod tests {
 
     fn radix_sort_bytes<S, N>(bytes: &mut [u8])
     where
-        S: SizeType,
+        S: Unsigned,
         N: NonZero<S>,
     {
         radix_sort::<S, N, _, _>(bytes, &|byte: &u8, _| *byte, N::new(S::one()).unwrap());
@@ -1200,7 +1102,7 @@ mod tests {
 
     fn radix_sort_tuples<S, N>(tuples: &mut [(u8, u8)])
     where
-        S: SizeType,
+        S: Unsigned,
         N: NonZero<S>,
     {
         radix_sort::<S, N, _, _>(

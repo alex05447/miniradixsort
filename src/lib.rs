@@ -113,6 +113,8 @@ const AMERICAN_FLAG_SORT_THRESHOLD: usize = 1024;
 /// from most to least significant.
 /// It is passed the slice element to extract the byte from and the radix index.
 ///
+/// `cmp` is a predicate which compares the given slice elements.
+///
 /// `num_lvls` is the number of bytes / radix "digits" to sort by.
 ///
 /// E.g., when sorting bytes (`T` is `u8`), `num_lvls` is `1` and `lvl` is always `0`.
@@ -123,77 +125,68 @@ const AMERICAN_FLAG_SORT_THRESHOLD: usize = 1024;
 ///
 /// [`https://probablydance.com/2016/12/27/i-wrote-a-faster-sorting-algorithm/`]()
 /// [`https://github.com/skarupke/ska_sort`]()
-pub fn radix_sort<S, N, T, B>(slice: &mut [T], b: &B, num_lvls: N)
+pub fn radix_sort<S, N, T, B, C>(slice: &mut [T], b: &B, cmp: &C, num_lvls: N)
 where
     S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8,
+    C: Fn(&T, &T, S) -> Ordering,
 {
-    radix_sort_lvl(slice, b, S::zero(), num_lvls);
+    radix_sort_lvl(slice, b, cmp, S::zero(), num_lvls);
 }
 
 /// See [`radix_sort`].
 ///
 /// Radix sorts the slice by bytes / radix "digits" in range `[lvl .. num_lvls)`.
 /// Does nothing if `lvl >= num_lvls`.
-pub fn radix_sort_lvl<S, N, T, B>(slice: &mut [T], b: &B, lvl: S, num_lvls: N)
+pub fn radix_sort_lvl<S, N, T, B, C>(slice: &mut [T], b: &B, cmp: &C, lvl: S, num_lvls: N)
 where
     S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8,
+    C: Fn(&T, &T, S) -> Ordering,
 {
     if lvl >= num_lvls.get() {
         return;
     }
 
-    radix_sort_impl::<STD_SORT_THRESHOLD, AMERICAN_FLAG_SORT_THRESHOLD, S, N, _, _>(
-        slice, b, lvl, num_lvls,
+    radix_sort_impl::<STD_SORT_THRESHOLD, AMERICAN_FLAG_SORT_THRESHOLD, S, N, _, _, _>(
+        slice, b, cmp, lvl, num_lvls,
     );
 }
 
-fn radix_sort_impl<const ST: usize, const AT: usize, S, N, T, B>(
+fn radix_sort_impl<const ST: usize, const AT: usize, S, N, T, B, C>(
     slice: &mut [T],
     b: &B,
+    cmp: &C,
     lvl: S,
     num_lvls: N,
 ) where
     S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8 + ?Sized,
+    C: Fn(&T, &T, S) -> Ordering,
 {
     debug_assert!(lvl < num_lvls.get());
 
     if slice.len() < ST {
-        std_sort(slice, b, lvl, num_lvls);
+        std_sort(slice, cmp, lvl, num_lvls);
     } else if slice.len() < AT {
-        american_flag_sort::<ST, AT, S, N, _, _>(slice, b, lvl, num_lvls);
+        american_flag_sort::<ST, AT, S, N, _, _, _>(slice, b, cmp, lvl, num_lvls);
     } else {
-        ska_sort::<ST, AT, S, N, _, _>(slice, b, lvl, num_lvls);
+        ska_sort::<ST, AT, S, N, _, _, _>(slice, b, cmp, lvl, num_lvls);
     }
 }
 
-fn std_sort<S, N, T, B>(slice: &mut [T], b: B, lvl: S, num_lvls: N)
+fn std_sort<S, N, T, C>(slice: &mut [T], cmp: &C, lvl: S, num_lvls: N)
 where
     S: Unsigned,
     N: NonZero<S>,
-    B: Fn(&T, S) -> u8,
+    C: Fn(&T, &T, S) -> Ordering,
 {
     debug_assert!(lvl < num_lvls.get());
 
-    slice.sort_unstable_by(|l, r| {
-        let mut lvl = lvl;
-        loop {
-            match b(l, lvl).cmp(&b(r, lvl)) {
-                Ordering::Less => return Ordering::Less,
-                Ordering::Equal => {}
-                Ordering::Greater => return Ordering::Greater,
-            }
-            lvl += S::one();
-            if lvl == num_lvls.get() {
-                return Ordering::Equal;
-            }
-        }
-    })
+    slice.sort_unstable_by(|l, r| cmp(l, r, lvl))
 }
 
 fn bucket_sizes<S, T, B>(slice: &mut [T], b: &B, lvl: S) -> [S; NUM_BUCKETS]
@@ -210,15 +203,17 @@ where
     bucket_sizes
 }
 
-fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
+fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B, C>(
     slice: &mut [T],
     b: &B,
+    cmp: &C,
     lvl: S,
     num_lvls: N,
 ) where
     S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8 + ?Sized,
+    C: Fn(&T, &T, S) -> Ordering,
 {
     debug_assert!(lvl < num_lvls.get());
 
@@ -345,9 +340,10 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
             debug_assert!(bucket_end > bucket_start);
             let bucket_size = bucket_end - bucket_start;
             if bucket_size > S::one() {
-                radix_sort_impl::<ST, AT, S, N, _, _>(
+                radix_sort_impl::<ST, AT, S, N, _, _, _>(
                     &mut slice[bucket_start.to_usize()..bucket_end.to_usize()],
                     b,
+                    cmp,
                     next_lvl,
                     num_lvls,
                 );
@@ -357,15 +353,17 @@ fn american_flag_sort<const ST: usize, const AT: usize, S, N, T, B>(
     }
 }
 
-fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
+fn ska_sort<const ST: usize, const AT: usize, S, N, T, B, C>(
     slice: &mut [T],
     b: &B,
+    cmp: &C,
     lvl: S,
     num_lvls: N,
 ) where
     S: Unsigned,
     N: NonZero<S>,
     B: Fn(&T, S) -> u8 + ?Sized,
+    C: Fn(&T, &T, S) -> Ordering,
 {
     debug_assert!(lvl < num_lvls.get());
 
@@ -476,9 +474,10 @@ fn ska_sort<const ST: usize, const AT: usize, S, N, T, B>(
             debug_assert!(bucket_end > bucket_start);
             let bucket_size = bucket_end - bucket_start;
             if bucket_size > S::one() {
-                radix_sort_impl::<ST, AT, S, N, _, _>(
+                radix_sort_impl::<ST, AT, S, N, _, _, _>(
                     &mut slice[bucket_start.to_usize()..bucket_end.to_usize()],
-                    b.clone(),
+                    b,
+                    cmp,
                     next_lvl,
                     num_lvls,
                 );
@@ -760,7 +759,7 @@ mod tests {
                 fu32(&mut unsorted);
             }
 
-            assert!(unsorted == sorted);
+            assert_eq!(unsorted, sorted);
         }
     }
 
@@ -877,9 +876,10 @@ mod tests {
         S: Unsigned,
         N: NonZero<S>,
     {
-        american_flag_sort::<1, { usize::MAX }, S, N, _, _>(
+        american_flag_sort::<1, { usize::MAX }, S, N, _, _, _>(
             bytes,
             &|byte: &u8, _| *byte,
+            &|l: &u8, r: &u8, _| l.cmp(r),
             S::zero(),
             N::new(S::one()).unwrap(),
         );
@@ -905,7 +905,7 @@ mod tests {
         S: Unsigned,
         N: NonZero<S>,
     {
-        american_flag_sort::<1, { usize::MAX }, S, N, _, _>(
+        american_flag_sort::<1, { usize::MAX }, S, N, _, _, _>(
             tuples,
             &|tuple: &(u8, u8), lvl: S| {
                 if lvl == S::zero() {
@@ -913,6 +913,15 @@ mod tests {
                 }
                 if lvl == S::one() {
                     return tuple.1;
+                }
+                unreachable!()
+            },
+            &|l: &(u8, u8), r: &(u8, u8), lvl: S| {
+                if lvl == S::zero() {
+                    return l.cmp(r);
+                }
+                if lvl == S::one() {
+                    return l.1.cmp(&r.1);
                 }
                 unreachable!()
             },
@@ -979,9 +988,10 @@ mod tests {
         S: Unsigned,
         N: NonZero<S>,
     {
-        ska_sort::<1, 1, S, N, _, _>(
+        ska_sort::<1, 1, S, N, _, _, _>(
             bytes,
             &|byte: &u8, _| *byte,
+            &|l: &u8, r: &u8, _| l.cmp(r),
             S::zero(),
             N::new(S::one()).unwrap(),
         );
@@ -1007,7 +1017,7 @@ mod tests {
         S: Unsigned,
         N: NonZero<S>,
     {
-        ska_sort::<1, 1, S, N, _, _>(
+        ska_sort::<1, 1, S, N, _, _, _>(
             tuples,
             &|tuple: &(u8, u8), lvl: S| {
                 if lvl == S::zero() {
@@ -1015,6 +1025,15 @@ mod tests {
                 }
                 if lvl == S::one() {
                     return tuple.1;
+                }
+                unreachable!()
+            },
+            &|l: &(u8, u8), r: &(u8, u8), lvl: S| {
+                if lvl == S::zero() {
+                    return l.cmp(r);
+                }
+                if lvl == S::one() {
+                    return l.1.cmp(&r.1);
                 }
                 unreachable!()
             },
@@ -1073,7 +1092,12 @@ mod tests {
         S: Unsigned,
         N: NonZero<S>,
     {
-        radix_sort::<S, N, _, _>(bytes, &|byte: &u8, _| *byte, N::new(S::one()).unwrap());
+        radix_sort::<S, N, _, _, _>(
+            bytes,
+            &|byte: &u8, _| *byte,
+            &|l: &u8, r: &u8, _| l.cmp(r),
+            N::new(S::one()).unwrap(),
+        );
     }
 
     fn radix_sort_bytes_u8(bytes: &mut [u8]) {
@@ -1105,7 +1129,7 @@ mod tests {
         S: Unsigned,
         N: NonZero<S>,
     {
-        radix_sort::<S, N, _, _>(
+        radix_sort::<S, N, _, _, _>(
             tuples,
             &|tuple: &(u8, u8), lvl: S| {
                 if lvl == S::zero() {
@@ -1113,6 +1137,15 @@ mod tests {
                 }
                 if lvl == S::one() {
                     return tuple.1;
+                }
+                unreachable!()
+            },
+            &|l: &(u8, u8), r: &(u8, u8), lvl: S| {
+                if lvl == S::zero() {
+                    return l.cmp(r);
+                }
+                if lvl == S::one() {
+                    return l.1.cmp(&r.1);
                 }
                 unreachable!()
             },
